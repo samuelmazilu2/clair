@@ -65,3 +65,6 @@ local-dev-matcher-restart:
 local-dev-swagger-ui-restart:
 	$(docker-compose) up -d --force-recreate swagger-ui
 	 
+.PHONY: container-build
+container-build:
+	$(docker) build -t clair-local:latest .

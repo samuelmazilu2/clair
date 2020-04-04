@@ -56,6 +56,7 @@ import (
 	_ "github.com/quay/clair/v2/ext/vulnsrc/oracle"
 	_ "github.com/quay/clair/v2/ext/vulnsrc/rhel"
 	_ "github.com/quay/clair/v2/ext/vulnsrc/ubuntu"
+	_ "github.com/quay/clair/v2/ext/vulnsrc/suse"
 )
 
 func waitForSignals(signals ...os.Signal) {

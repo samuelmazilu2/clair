@@ -19,7 +19,6 @@ package suse
 import (
 	"bufio"
 	"encoding/xml"
-	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -29,21 +28,17 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/quay/clair/v2/database"
-	"github.com/quay/clair/v2/ext/versionfmt"
-	"github.com/quay/clair/v2/ext/versionfmt/rpm"
-	"github.com/quay/clair/v2/ext/vulnsrc"
-	"github.com/quay/clair/v2/pkg/commonerr"
+	"fmt"
+
+	"github.com/coreos/clair/database"
+	"github.com/coreos/clair/ext/versionfmt"
+	"github.com/coreos/clair/ext/versionfmt/rpm"
+	"github.com/coreos/clair/ext/vulnsrc"
+	"github.com/coreos/clair/pkg/commonerr"
 )
 
 const (
 	ovalURI = "http://ftp.suse.com/pub/projects/security/oval/"
-
-	// "Thu, 30 Nov 2017 03:07:57 GMT
-	timeFormatLastModified = "Mon, 2 Jan 2006 15:04:05 MST"
-
-	// timestamp format 2017-10-23T04:07:14
-	timeFormatOVAL = "2006-1-2T15:04:05"
 )
 
 var (
@@ -111,7 +106,7 @@ func newUpdater(f flavor) updater {
 		up.UpdaterFlag = "openSUSEUpdater"
 		up.FileRegexp = regexp.MustCompile(`opensuse.leap.(\d+\.*\d*).xml`)
 	default:
-		panic("tried to create an updater for an unrecognized flavor of openSUSE/SUSE")
+		panic("Unrecognized flavor")
 	}
 
 	return up
@@ -127,38 +122,27 @@ func init() {
 func (u *updater) Update(datastore database.Datastore) (resp vulnsrc.UpdateResponse, err error) {
 	log.WithField("package", u.Name).Info("Start fetching vulnerabilities")
 
-	tx, err := datastore.Begin()
-	if err != nil {
-		return resp, err
-	}
-	defer tx.Rollback()
-
 	// openSUSE and SUSE have one single xml file for all the products, there are no incremental
 	// xml files. We store into the database the value of the generation timestamp
 	// of the latest file we parsed.
-	flagValue, ok, err := tx.FindKeyValue(u.UpdaterFlag)
+	flagValue, err := datastore.GetKeyValue(u.UpdaterFlag)
 	if err != nil {
 		return resp, err
 	}
-	log.WithField("flagvalue", flagValue).Debug("Generation timestamp of latest parsed file")
+	log.WithField("flagvalue", flagValue)
 
-	if !ok {
+	if flagValue == "" {
 		flagValue = "0"
 	}
 
 	// this contains the modification time of the most recent
 	// file expressed as unix time (int64)
-	latestOval, err := strconv.ParseInt(flagValue, 10, 64)
-	if err != nil {
-		// something went wrong, force parsing of all files
-		latestOval = 0
-	}
+	latestOval, _ := strconv.ParseInt(flagValue, 10, 64)
 
 	// Fetch the update list.
 	r, err := http.Get(ovalURI)
 	if err != nil {
-		err = fmt.Errorf("Cannot download SUSE update list: %v", err)
-		return resp, err
+		log.Fatal(err)
 	}
 	defer r.Body.Close()
 
@@ -174,12 +158,13 @@ func (u *updater) Update(datastore database.Datastore) (resp vulnsrc.UpdateRespo
 		}
 
 		ovalFile := ovalURI + u.FilePrefix + r[1] + ".xml"
-		log.WithFields(log.Fields{
-			"ovalFile": ovalFile,
-			"updater":  u.Name,
-		}).Debug("file to check")
+		log.WithFields(
+			log.Fields{
+				"ovalFile": ovalFile,
+				"updater":  u.Name,
+			}).Debug("file to check")
 
-		// Do not fetch the entire file to get the value of the
+		// do not fetch the entire file to get the value of the
 		// creation time. Rely on the "latest modified time"
 		// value of the file hosted on the remote server.
 		timestamp, err := getLatestModifiedTime(ovalFile)
@@ -199,7 +184,6 @@ func (u *updater) Update(datastore database.Datastore) (resp vulnsrc.UpdateRespo
 			log.WithError(err).Error("could not download", u.Name, "update list")
 			return resp, commonerr.ErrCouldNotDownload
 		}
-		defer r.Body.Close()
 
 		match := u.FileRegexp.FindStringSubmatch(oval)
 		if len(match) != 2 {
@@ -216,7 +200,9 @@ func (u *updater) Update(datastore database.Datastore) (resp vulnsrc.UpdateRespo
 		generationTimes = append(generationTimes, generationTime)
 
 		// Collect vulnerabilities.
-		resp.Vulnerabilities = append(resp.Vulnerabilities, vs...)
+		for _, v := range vs {
+			resp.Vulnerabilities = append(resp.Vulnerabilities, v)
+		}
 	}
 
 	// Set the flag if we found anything.
@@ -243,7 +229,9 @@ func getLatestModifiedTime(url string) (int64, error) {
 		return 0, fmt.Errorf("last modified header missing")
 	}
 
-	timestamp, err := time.Parse(timeFormatLastModified, last_modified)
+	// "Thu, 30 Nov 2017 03:07:57 GMT
+	layout := "Mon, 2 Jan 2006 15:04:05 MST"
+	timestamp, err := time.Parse(layout, last_modified)
 	if err != nil {
 		return 0, err
 	}
@@ -262,7 +250,7 @@ func latest(values []int64) (ret int64) {
 
 func (u *updater) Clean() {}
 
-func parseOval(ovalReader io.Reader, osFlavor, osVersion string) (vulnerabilities []database.VulnerabilityWithAffected, generationTime int64, err error) {
+func parseOval(ovalReader io.Reader, osFlavor, osVersion string) (vulnerabilities []database.Vulnerability, generationTime int64, err error) {
 	// Decode the XML.
 	var ov oval
 	err = xml.NewDecoder(ovalReader).Decode(&ov)
@@ -272,7 +260,9 @@ func parseOval(ovalReader io.Reader, osFlavor, osVersion string) (vulnerabilitie
 		return
 	}
 
-	timestamp, err := time.Parse(timeFormatOVAL, ov.Timestamp)
+	// timestamp format 2017-10-23T04:07:14
+	layout := "2006-1-2T15:04:05"
+	timestamp, err := time.Parse(layout, ov.Timestamp)
 	if err != nil {
 		return
 	}
@@ -283,15 +273,16 @@ func parseOval(ovalReader io.Reader, osFlavor, osVersion string) (vulnerabilitie
 	for _, definition := range ov.Definitions {
 		pkgs := toFeatureVersions(definition.Criteria, osFlavor, osVersion)
 		if len(pkgs) > 0 {
-			vulnerability := database.VulnerabilityWithAffected{
-				Vulnerability: database.Vulnerability{
-					Name:        name(definition),
-					Link:        link(definition),
-					Severity:    severity(definition),
-					Description: description(definition),
-				},
+			vulnerability := database.Vulnerability{
+				Name: name(definition),
+				Link: link(definition),
+				//TODO: handle that once openSUSE/SLE OVAL files have severity info
+				Severity:    database.UnknownSeverity,
+				Description: description(definition),
 			}
-			vulnerability.Affected = append(vulnerability.Affected, pkgs...)
+			for _, p := range pkgs {
+				vulnerability.FixedIn = append(vulnerability.FixedIn, p)
+			}
 			vulnerabilities = append(vulnerabilities, vulnerability)
 		}
 	}
@@ -374,60 +365,59 @@ func getPossibilities(node criteria) [][]criterion {
 	return possibilities
 }
 
-func toFeatureVersions(criteria criteria, osFlavor, osVersion string) []database.AffectedFeature {
+func toFeatureVersions(criteria criteria, osFlavor, osVersion string) []database.FeatureVersion {
 	// There are duplicates in SUSE .xml files.
 	// This map is for deduplication.
-	featureVersionParameters := make(map[string]database.AffectedFeature)
+	featureVersionParameters := make(map[string]database.FeatureVersion)
 
 	possibilities := getPossibilities(criteria)
 	for _, criterions := range possibilities {
-		var featureVersion database.AffectedFeature
+		var featureVersion database.FeatureVersion
 
 		// Attempt to parse package data from trees of criterions.
 		for _, c := range criterions {
 			if match := suseInstalledCommentRegexp.FindStringSubmatch(c.Comment); match != nil {
-				if len(match) == 4 {
+				if len(match) != 4 {
+					log.WithField("comment", c.Comment).Warning("could not extract sles name and version from comment")
+				} else {
 					osVersion = match[1]
 					if match[3] != "" {
 						osVersion = fmt.Sprintf("%s.%s", osVersion, match[3])
 					}
-				} else {
-					log.WithField("comment", c.Comment).Warning("could not extract sles name and version from comment")
 				}
 			}
 
 			if suseOpenSUSEInstalledCommentRegexp.FindStringSubmatch(c.Comment) == nil && strings.HasSuffix(c.Comment, " is installed") {
-				name, version, err := splitPackageNameAndVersion(c.Comment[:len(c.Comment)-len(" is installed")])
+				name, version, err := splitPackageNameAndVersion(c.Comment[:len(c.Comment)-13])
 				if err != nil {
 					log.WithError(err).WithField("comment", c.Comment).Warning("Could not extract package name and version from comment")
 				} else {
-					featureVersion.FeatureName = name
+					featureVersion.Feature.Name = name
 					version := version
 					err := versionfmt.Valid(rpm.ParserName, version)
 					if err != nil {
 						log.WithError(err).WithField("version", version).Warning("could not parse package version. skipping")
 					} else {
-						featureVersion.AffectedVersion = version
 						if version != versionfmt.MaxVersion {
-							featureVersion.FixedInVersion = version
+							featureVersion.Version = version
 						}
 					}
 				}
 			}
 		}
 
-		featureVersion.Namespace.Name = fmt.Sprintf("%s:%s", osFlavor, osVersion)
-		featureVersion.Namespace.VersionFormat = rpm.ParserName
+		featureVersion.Feature.Namespace.Name = fmt.Sprintf("%s:%s", osFlavor, osVersion)
+		featureVersion.Feature.Namespace.VersionFormat = rpm.ParserName
 
-		if featureVersion.Namespace.Name != "" && featureVersion.FeatureName != "" && featureVersion.AffectedVersion != "" && featureVersion.FixedInVersion != "" {
-			featureVersionParameters[featureVersion.Namespace.Name+":"+featureVersion.FeatureName] = featureVersion
+		if featureVersion.Feature.Namespace.Name != "" && featureVersion.Feature.Name != "" && featureVersion.Version != "" {
+			featureVersionParameters[featureVersion.Feature.Namespace.Name+":"+featureVersion.Feature.Name] = featureVersion
 		} else {
 			log.WithField("criterions", fmt.Sprintf("%v", criterions)).Warning("could not determine a valid package from criterions")
 		}
 	}
 
 	// Convert the map to slice.
-	var featureVersionParametersArray []database.AffectedFeature
+	var featureVersionParametersArray []database.FeatureVersion
 	for _, fv := range featureVersionParameters {
 		featureVersionParametersArray = append(featureVersionParametersArray, fv)
 	}
@@ -458,15 +448,11 @@ func link(def definition) (link string) {
 	return
 }
 
-func severity(def definition) (severity database.Severity) {
-	//TODO: handle that once openSUSE/SLE OVAL files have severity info
-	return database.UnknownSeverity
-}
-
 func splitPackageNameAndVersion(fullname string) (name, version string, err error) {
 	re := regexp.MustCompile(`-\d+\.`)
 
 	matches := re.FindStringSubmatchIndex(fullname)
+
 	if matches == nil {
 		err = fmt.Errorf("Cannot extract package name and version from %s", fullname)
 	} else {

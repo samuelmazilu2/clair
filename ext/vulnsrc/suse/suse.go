@@ -30,11 +30,11 @@ import (
 
 	"fmt"
 
-	"github.com/coreos/clair/database"
-	"github.com/coreos/clair/ext/versionfmt"
-	"github.com/coreos/clair/ext/versionfmt/rpm"
-	"github.com/coreos/clair/ext/vulnsrc"
-	"github.com/coreos/clair/pkg/commonerr"
+	"github.com/quay/clair/v2/database"
+	"github.com/quay/clair/v2/ext/versionfmt"
+	"github.com/quay/clair/v2/ext/versionfmt/rpm"
+	"github.com/quay/clair/v2/ext/vulnsrc"
+	"github.com/quay/clair/v2/pkg/commonerr"
 )
 
 const (
